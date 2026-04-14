@@ -29,6 +29,8 @@ require "tmpdir"
 require "shellwords"
 
 module ShrimpoVideoGenerator
+  DATAFRUITS_HOST = "https://datafruits.streampusher.com"
+
   # Video output settings optimized for YouTube
   VIDEO_WIDTH       = 1920
   VIDEO_HEIGHT      = 1080
@@ -364,6 +366,10 @@ module ShrimpoVideoGenerator
           options[:avatar] = v
         end
 
+        opts.on("-u", "--url URL", "datafruits shrimpo entry URL to auto-fill metadata and assets") do |v|
+          options[:url] = v
+        end
+
         opts.on("-t", "--title TITLE", "Track title") do |v|
           options[:title] = v
         end
@@ -399,15 +405,74 @@ module ShrimpoVideoGenerator
       end
 
       parser.parse!(argv)
+      populate_options_from_url!(options) if options[:url]
 
       unless options[:audio] && options[:avatar]
-        $stderr.puts "Error: --audio and --avatar are required."
+        $stderr.puts "Error: --audio and --avatar are required unless --url provides them."
         $stderr.puts ""
         $stderr.puts parser
         exit 1
       end
 
       options
+    end
+
+    def self.populate_options_from_url!(options)
+      attributes = fetch_shrimpo_entry_attributes(options[:url])
+      audio_url = attributes["audio_file_url"] || attributes["cdn_url"]
+
+      abort "Error: Shrimpo entry is missing an audio URL." if blank?(audio_url)
+      abort "Error: Shrimpo entry is missing a user avatar URL." if blank?(attributes["user_avatar"])
+
+      options[:audio] ||= audio_url
+      options[:avatar] ||= attributes["user_avatar"]
+      options[:title] ||= attributes["title"]
+      options[:artist] ||= attributes["username"]
+      options[:shrimpo_title] ||= attributes["shrimpo_title"]
+    end
+
+    def self.fetch_shrimpo_entry_attributes(entry_url)
+      api_url = build_shrimpo_entry_api_url(entry_url)
+      uri = URI.parse(api_url)
+      response = Net::HTTP.start(uri.host, uri.port, use_ssl: uri.scheme == "https") do |http|
+        request = Net::HTTP::Get.new(uri)
+        request["Accept"] = "application/json"
+        http.request(request)
+      end
+
+      unless response.is_a?(Net::HTTPSuccess)
+        abort "Error: Failed to fetch #{api_url} (HTTP #{response.code})"
+      end
+
+      payload = JSON.parse(response.body)
+      payload.fetch("data").fetch("attributes")
+    rescue JSON::ParserError => e
+      abort "Error: Failed to parse shrimpo entry metadata: #{e.message}"
+    rescue KeyError
+      abort "Error: Unexpected shrimpo entry response from #{api_url}"
+    end
+
+    def self.build_shrimpo_entry_api_url(entry_url)
+      uri = URI.parse(entry_url)
+
+      unless %w[datafruits.fm www.datafruits.fm].include?(uri.host)
+        abort "Error: --url must point to a datafruits.fm shrimpo entry."
+      end
+
+      match = uri.path.match(%r{\A/shrimpos/([^/]+)/entry/([^/]+)/?\z})
+      unless match
+        abort "Error: --url must match /shrimpos/:shrimpo_slug/entry/:entry_slug"
+      end
+
+      shrimpo_slug = match[1]
+      entry_slug = match[2]
+      "#{DATAFRUITS_HOST}/api/shrimpos/#{shrimpo_slug}/shrimpo_entries/#{entry_slug}.json"
+    rescue URI::InvalidURIError => e
+      abort "Error: Invalid --url value: #{e.message}"
+    end
+
+    def self.blank?(value)
+      value.nil? || value.strip.empty?
     end
   end
 end
